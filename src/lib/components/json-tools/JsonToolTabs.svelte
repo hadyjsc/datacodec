@@ -1,0 +1,606 @@
+<script lang="ts">
+	import { onMount } from 'svelte';
+	import { jsonToYaml, yamlToJson, jsonToCsv, csvToJson } from '#lib/json/convert';
+	import { jsonToXml, xmlToJson } from '#lib/json/xml';
+	import { queryJsonPath } from '#lib/json/jsonpath';
+	import { generateSchema, generateMock } from '#lib/json/schema';
+	import { cleanJson } from '#lib/json/clean';
+	import { paginateArray } from '#lib/json/paginate';
+	import SafeIcon from '#lib/SafeIcon.svelte';
+	import MonacoField from './MonacoField.svelte';
+	import GitHubDiff from './GitHubDiff.svelte';
+	import { confirmOnLeave } from '#lib/navigation-guard';
+
+	type Tab =
+		| 'convert'
+		| 'minify'
+		| 'stringify'
+		| 'query'
+		| 'schema'
+		| 'mock'
+		| 'paginate'
+		| 'clean'
+		| 'compare';
+
+	const tabs: { id: Tab; label: string; icon: string }[] = [
+		{ id: 'convert', label: 'Convert', icon: 'mdi:swap-horizontal' },
+		{ id: 'minify', label: 'Minify', icon: 'mdi:compress' },
+		{ id: 'stringify', label: 'Stringify', icon: 'mdi:format-text' },
+		{ id: 'query', label: 'JSONPath', icon: 'mdi:magnify' },
+		{ id: 'schema', label: 'Schema', icon: 'mdi:file-code-outline' },
+		{ id: 'mock', label: 'Mock', icon: 'mdi:auto-fix' },
+		{ id: 'paginate', label: 'Paginate', icon: 'mdi:page-next' },
+		{ id: 'clean', label: 'Clean', icon: 'mdi:broom' },
+		{ id: 'compare', label: 'Compare', icon: 'mdi:compare' }
+	];
+
+	let activeTab = $state<Tab>('convert');
+	let output = $state('');
+	let error = $state('');
+
+	// Convert
+	let convertInput = $state('{\n  "name": "John Doe",\n  "age": 30,\n  "tags": ["admin", "dev"]\n}');
+	let convertFormat = $state<'yaml' | 'csv' | 'xml'>('yaml');
+	let convertMode = $state<'json-to-x' | 'x-to-json'>('json-to-x');
+
+	// Minify
+	let minifyInput = $state('{\n  "name": "John Doe",\n  "age": 30\n}');
+	let minifyIndent = $state(0);
+
+	// Stringify
+	let stringifyInput = $state('{\n  "name": "John Doe",\n  "age": 30,\n  "active": true\n}');
+	let stringifyMode = $state<'parse' | 'stringify'>('stringify');
+	let stringifyEscapes = $state(false);
+
+	// Query
+	let queryInput = $state('{\n  "users": [\n    { "name": "Alice", "age": 30 },\n    { "name": "Bob", "age": 25 }\n  ]\n}');
+	let queryPath = $state('$.users[?(@.age > 26)].name');
+
+	// Schema
+	let schemaInput = $state('{\n  "name": "John Doe",\n  "age": 30,\n  "active": true,\n  "tags": ["a", "b"]\n}');
+
+	// Mock
+	let mockInput = $state('{\n  "type": "object",\n  "properties": {\n    "name": { "type": "string" },\n    "age": { "type": "integer" },\n    "email": { "type": "string", "format": "email" }\n  }\n}');
+
+	// Paginate
+	let paginateInput = $state('[\n  { "id": 1, "name": "Item 1" },\n  { "id": 2, "name": "Item 2" }\n]');
+	let paginatePage = $state(1);
+	let paginatePageSize = $state(10);
+
+	// Clean
+	let cleanInput = $state('{\n  "a": 1,\n  "b": null,\n  "c": "",\n  "d": [],\n  "e": { "x": null }\n}');
+	let cleanOpts = $state({
+		removeNulls: true,
+		removeEmptyObjects: true,
+		removeEmptyArrays: true,
+		removeEmptyStrings: true,
+		sortKeys: false,
+		dedupeArrays: false,
+		trimStrings: false
+	});
+
+	// Compare
+	let compareOriginal = $state('{\n  "name": "Alice",\n  "role": "admin",\n  "active": true\n}');
+	let compareModified = $state('{\n  "name": "Alice",\n  "role": "viewer",\n  "active": true,\n  "lastLogin": "2024-01-15"\n}');
+	let compareDiffOriginal = $state('');
+	let compareDiffModified = $state('');
+
+	let meta = $state('');
+
+	// Monaco language for the convert input/output depends on the active format.
+	let convertInLang = $derived(
+		convertMode === 'x-to-json' ? (convertFormat === 'yaml' ? 'yaml' : 'plaintext') : 'json'
+	);
+	let outputLang = $derived(
+		activeTab === 'convert'
+			? convertMode === 'json-to-x'
+				? convertFormat === 'yaml'
+					? 'yaml'
+					: 'plaintext'
+				: 'json'
+			: 'json'
+	);
+
+	let activeLabel = $derived(tabs.find((t) => t.id === activeTab)?.label ?? '');
+	let activeIcon = $derived(tabs.find((t) => t.id === activeTab)?.icon ?? 'mdi:swap-horizontal');
+
+	function setResult(text: string, metaText = '') {
+		output = text;
+		error = '';
+		meta = metaText;
+	}
+
+	function setErr(msg: string) {
+		error = msg;
+		output = '';
+		meta = '';
+	}
+
+	function runConvert() {
+		try {
+			if (convertMode === 'json-to-x') {
+				if (convertFormat === 'yaml') setResult(jsonToYaml(convertInput));
+				else if (convertFormat === 'csv') setResult(jsonToCsv(convertInput));
+				else setResult(jsonToXml(convertInput));
+			} else {
+				if (convertFormat === 'yaml') setResult(yamlToJson(convertInput));
+				else if (convertFormat === 'csv') setResult(csvToJson(convertInput));
+				else setResult(xmlToJson(convertInput));
+			}
+		} catch (e: any) {
+			setErr(e.message || String(e));
+		}
+	}
+
+	function runMinify() {
+		try {
+			const parsed = JSON.parse(minifyInput);
+			setResult(JSON.stringify(parsed, null, minifyIndent || undefined));
+		} catch (e: any) {
+			setErr(e.message || String(e));
+		}
+	}
+
+	function runStringify() {
+		try {
+			let cleaned = stringifyInput.replace(/\\"/g, '"');
+			const parsed = JSON.parse(cleaned);
+			let result: string;
+			if (stringifyMode === 'stringify') {
+				result = JSON.stringify(parsed);
+				if (stringifyEscapes) {
+					result = result.replace(/"/g, '\\"');
+				}
+			} else {
+				result = JSON.stringify(parsed, null, 2);
+			}
+			setResult(result, stringifyMode === 'stringify' ? 'Stringified (minified) output' : 'Parsed & formatted output');
+		} catch (e: any) {
+			setErr('Invalid JSON: ' + (e.message || String(e)));
+		}
+	}
+
+	function runQuery() {
+		try {
+			const data = JSON.parse(queryInput);
+			const results = queryJsonPath(data, queryPath);
+			setResult(JSON.stringify(results, null, 2));
+		} catch (e: any) {
+			setErr(e.message || String(e));
+		}
+	}
+
+	function runSchema() {
+		try {
+			const data = JSON.parse(schemaInput);
+			setResult(JSON.stringify(generateSchema(data), null, 2));
+		} catch (e: any) {
+			setErr(e.message || String(e));
+		}
+	}
+
+	function runMock() {
+		try {
+			const schema = JSON.parse(mockInput);
+			setResult(JSON.stringify(generateMock(schema), null, 2));
+		} catch (e: any) {
+			setErr(e.message || String(e));
+		}
+	}
+
+	function runPaginate() {
+		try {
+			const data = JSON.parse(paginateInput);
+			const r = paginateArray(data, paginatePage, paginatePageSize);
+			paginatePage = r.page;
+			setResult(JSON.stringify(r.items, null, 2), `Page ${r.page}/${r.totalPages} — ${r.total} items (page size ${r.pageSize})`);
+		} catch (e: any) {
+			setErr(e.message || String(e));
+		}
+	}
+
+	function runClean() {
+		try {
+			const data = JSON.parse(cleanInput);
+			setResult(JSON.stringify(cleanJson(data, cleanOpts), null, 2));
+		} catch (e: any) {
+			setErr(e.message || String(e));
+		}
+	}
+
+	// Recursively sort object keys so key order / whitespace don't show up as diffs.
+	function sortKeysDeep(value: any): any {
+		if (Array.isArray(value)) return value.map(sortKeysDeep);
+		if (value && typeof value === 'object') {
+			const sorted: any = {};
+			for (const key of Object.keys(value).sort()) {
+				sorted[key] = sortKeysDeep(value[key]);
+			}
+			return sorted;
+		}
+		return value;
+	}
+
+	function runCompare() {
+		try {
+			const a = JSON.parse(compareOriginal);
+			const b = JSON.parse(compareModified);
+			compareDiffOriginal = JSON.stringify(sortKeysDeep(a), null, 2);
+			compareDiffModified = JSON.stringify(sortKeysDeep(b), null, 2);
+			output = '';
+			error = '';
+			meta = 'Comparison complete — GitHub-style diff (green = added, red = removed).';
+		} catch (e: any) {
+			compareDiffOriginal = '';
+			compareDiffModified = '';
+			setErr(e.message || String(e));
+		}
+	}
+
+	function swapCompare() {
+		const t = compareOriginal;
+		compareOriginal = compareModified;
+		compareModified = t;
+		compareDiffOriginal = '';
+		compareDiffModified = '';
+	}
+
+	function selectTab(id: Tab) {
+		activeTab = id;
+		clearOutput();
+	}
+
+	function runActive() {
+		if (activeTab === 'convert') runConvert();
+		else if (activeTab === 'minify') runMinify();
+		else if (activeTab === 'stringify') runStringify();
+		else if (activeTab === 'query') runQuery();
+		else if (activeTab === 'schema') runSchema();
+		else if (activeTab === 'mock') runMock();
+		else if (activeTab === 'paginate') runPaginate();
+		else if (activeTab === 'clean') runClean();
+		else if (activeTab === 'compare') runCompare();
+	}
+
+	function clearOutput() {
+		output = '';
+		error = '';
+		meta = '';
+	}
+
+	function downloadOutput() {
+		if (!output) return;
+		const ext = outputLang === 'yaml' ? 'yaml' : outputLang === 'plaintext' ? 'txt' : 'json';
+		const blob = new Blob([output], { type: 'application/octet-stream' });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = `json-tools-output.${ext}`;
+		document.body.appendChild(a);
+		a.click();
+		a.remove();
+		URL.revokeObjectURL(url);
+	}
+
+	// Alt+1..9 switches feature, Ctrl/Cmd+Enter runs the active feature.
+	function onGlobalKey(e: KeyboardEvent) {
+		if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) {
+			const n = Number(e.key);
+			if (n >= 1 && n <= tabs.length) {
+				e.preventDefault();
+				selectTab(tabs[n - 1].id);
+			}
+		} else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+			e.preventDefault();
+			runActive();
+		}
+	}
+
+	onMount(() => {
+		window.addEventListener('keydown', onGlobalKey);
+		return () => window.removeEventListener('keydown', onGlobalKey);
+	});
+
+	function copyOutput() {
+		navigator.clipboard?.writeText(output);
+	}
+
+	// Reset every tool back to its sample data (wired to the header "Load Sample" button).
+	export function loadSample() {
+		convertInput = '{\n  "name": "John Doe",\n  "age": 30,\n  "tags": ["admin", "dev"]\n}';
+		convertFormat = 'yaml';
+		convertMode = 'json-to-x';
+		minifyInput = '{\n  "name": "John Doe",\n  "age": 30\n}';
+		minifyIndent = 0;
+		stringifyInput = '{\n  "name": "John Doe",\n  "age": 30,\n  "active": true\n}';
+		stringifyMode = 'stringify';
+		stringifyEscapes = false;
+		queryInput =
+			'{\n  "users": [\n    { "name": "Alice", "age": 30 },\n    { "name": "Bob", "age": 25 }\n  ]\n}';
+		queryPath = '$.users[?(@.age > 26)].name';
+		schemaInput =
+			'{\n  "name": "John Doe",\n  "age": 30,\n  "active": true,\n  "tags": ["a", "b"]\n}';
+		mockInput =
+			'{\n  "type": "object",\n  "properties": {\n    "name": { "type": "string" },\n    "age": { "type": "integer" },\n    "email": { "type": "string", "format": "email" }\n  }\n}';
+		paginateInput = '[\n  { "id": 1, "name": "Item 1" },\n  { "id": 2, "name": "Item 2" }\n]';
+		paginatePage = 1;
+		paginatePageSize = 10;
+		cleanInput = '{\n  "a": 1,\n  "b": null,\n  "c": "",\n  "d": [],\n  "e": { "x": null }\n}';
+		cleanOpts = {
+			removeNulls: true,
+			removeEmptyObjects: true,
+			removeEmptyArrays: true,
+			removeEmptyStrings: true,
+			sortKeys: false,
+			dedupeArrays: false,
+			trimStrings: false
+		};
+		compareOriginal = '{\n  "name": "Alice",\n  "role": "admin",\n  "active": true\n}';
+		compareModified =
+			'{\n  "name": "Alice",\n  "role": "viewer",\n  "active": true,\n  "lastLogin": "2024-01-15"\n}';
+		compareDiffOriginal = '';
+		compareDiffModified = '';
+		clearOutput();
+	}
+
+	// Warn before reload / back / forward / swipe / navigating away with unsaved data.
+	// Inputs are prefilled with samples, so we only warn when a result was generated.
+	function hasUnsavedData() {
+		return output.trim() !== '';
+	}
+	confirmOnLeave(hasUnsavedData);
+</script>
+
+<!-- Tab Navigation (matches ISO 8583 Studio layout) -->
+<nav class="sticky top-0 z-20 bg-white/80 backdrop-blur border-b border-green-100 shadow-sm">
+	<div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+		<div class="flex gap-1 overflow-x-auto py-2">
+			{#each tabs as tab, i}
+				<button
+					type="button"
+					title="{tab.label} (Alt+{i + 1})"
+					aria-label={tab.label}
+					onclick={() => selectTab(tab.id)}
+					class="flex shrink-0 items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-all {activeTab === tab.id
+						? 'bg-gradient-to-r from-green-500 to-emerald-500 text-white shadow-md'
+						: 'text-gray-600 hover:bg-green-50'}"
+				>
+					<SafeIcon iconName={tab.icon} customClass="h-4 w-4" />
+					{tab.label}
+				</button>
+			{/each}
+		</div>
+	</div>
+</nav>
+
+<div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+	<div class="overflow-hidden rounded-2xl border border-green-100 bg-white shadow-xl">
+
+	<!-- Gradient Header Card -->
+	<div class="overflow-hidden bg-gradient-to-r from-green-500 to-emerald-500 p-5 flex flex-wrap items-center justify-between gap-3">
+		<div class="flex items-center gap-3">
+			<SafeIcon iconName={activeIcon} customClass="h-6 w-6 text-white" />
+			<h2 class="text-xl font-bold text-white">{activeLabel}</h2>
+		</div>
+		<div class="flex flex-wrap items-center gap-2">
+			{#if activeTab === 'convert'}
+			<div class="flex rounded-lg bg-white/20 p-0.5 backdrop-blur-sm">
+						<button
+							type="button"
+							onclick={() => (convertMode = 'json-to-x')}
+							class="rounded-md px-3 py-1 text-xs font-semibold transition-all {convertMode === 'json-to-x'
+								? 'bg-white text-green-700 shadow'
+								: 'text-white hover:bg-white/20'}"
+						>
+							JSON → Format
+						</button>
+						<button
+							type="button"
+							onclick={() => (convertMode = 'x-to-json')}
+							class="rounded-md px-3 py-1 text-xs font-semibold transition-all {convertMode === 'x-to-json'
+								? 'bg-white text-green-700 shadow'
+								: 'text-white hover:bg-white/20'}"
+						>
+							Format → JSON
+						</button>
+					</div>
+					<div class="flex gap-1.5">
+						<button
+							type="button"
+							onclick={() => (convertFormat = 'yaml')}
+							class="rounded-md px-3 py-1 text-xs font-semibold transition-all {convertFormat === 'yaml'
+								? 'bg-white text-green-700 shadow'
+								: 'bg-white/20 text-white backdrop-blur-sm hover:bg-white/30'}"
+						>
+							YAML
+						</button>
+						<button
+							type="button"
+							onclick={() => (convertFormat = 'csv')}
+							class="rounded-md px-3 py-1 text-xs font-semibold transition-all {convertFormat === 'csv'
+								? 'bg-white text-green-700 shadow'
+								: 'bg-white/20 text-white backdrop-blur-sm hover:bg-white/30'}"
+						>
+							CSV
+						</button>
+						<button
+							type="button"
+							onclick={() => (convertFormat = 'xml')}
+							class="rounded-md px-3 py-1 text-xs font-semibold transition-all {convertFormat === 'xml'
+								? 'bg-white text-green-700 shadow'
+								: 'bg-white/20 text-white backdrop-blur-sm hover:bg-white/30'}"
+						>
+							XML
+						</button>
+					</div>
+				{/if}
+				<div class="flex items-center gap-2">
+					<button
+						type="button"
+						title="Run {activeLabel} (Ctrl+Enter)"
+						onclick={runActive}
+						class="flex items-center gap-1.5 rounded-lg bg-white/20 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-white/30"
+					>
+						<SafeIcon iconName="mdi:play" customClass="h-4 w-4" />
+						<span>{activeLabel}</span>
+					</button>
+					<button
+						type="button"
+						title="Copy output"
+						aria-label="Copy output"
+						onclick={copyOutput}
+						class="rounded-lg bg-white/20 p-2 text-white transition-colors hover:bg-white/30"
+					>
+						<SafeIcon iconName="mdi:content-copy" customClass="h-5 w-5" />
+					</button>
+					<button
+						type="button"
+						title="Download output"
+						aria-label="Download output"
+						onclick={downloadOutput}
+						class="rounded-lg bg-white/20 p-2 text-white transition-colors hover:bg-white/30"
+					>
+						<SafeIcon iconName="mdi:download" customClass="h-5 w-5" />
+					</button>
+					<button
+						type="button"
+						title="Clear output"
+						aria-label="Clear output"
+						onclick={clearOutput}
+						class="rounded-lg bg-white/20 p-2 text-white transition-colors hover:bg-white/30"
+					>
+						<SafeIcon iconName="mdi:delete" customClass="h-5 w-5" />
+					</button>
+				</div>
+			</div>
+		</div>
+
+	<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 p-4">
+		<div>
+			{#if activeTab === 'convert'}
+				<div class="mb-2">
+					<span class="text-sm font-medium text-gray-600">Input</span>
+				</div>
+				<MonacoField bind:value={convertInput} language={convertInLang} height="14rem" />
+{:else if activeTab === 'minify'}
+				<div class="mb-2 flex items-center gap-2 text-sm text-gray-600">
+					<span>Indent:</span>
+					<select bind:value={minifyIndent} class="border border-gray-300 rounded px-2 py-1 text-sm">
+						<option value={0}>0 (minify)</option>
+						<option value={2}>2</option>
+						<option value={4}>4</option>
+					</select>
+				</div>
+				<MonacoField bind:value={minifyInput} language="json" height="16rem" />
+{:else if activeTab === 'stringify'}
+				<div class="mb-2 flex flex-wrap items-center gap-3">
+					<div class="flex gap-2">
+						<button
+							type="button"
+							onclick={() => (stringifyMode = 'stringify')}
+							class="px-3 py-1 text-sm rounded border {stringifyMode === 'stringify'
+								? 'bg-emerald-100 border-emerald-400 text-emerald-700'
+								: 'border-gray-300 text-gray-600'}"
+						>
+							Stringify
+						</button>
+						<button
+							type="button"
+							onclick={() => (stringifyMode = 'parse')}
+							class="px-3 py-1 text-sm rounded border {stringifyMode === 'parse'
+								? 'bg-emerald-100 border-emerald-400 text-emerald-700'
+								: 'border-gray-300 text-gray-600'}"
+						>
+							Parse
+						</button>
+					</div>
+					{#if stringifyMode === 'stringify'}
+						<label class="flex items-center gap-1 text-sm text-gray-600">
+							<input type="checkbox" bind:checked={stringifyEscapes} /> Add Escapes (\")
+						</label>
+					{/if}
+				</div>
+				<MonacoField bind:value={stringifyInput} language="json" height="16rem" />
+{:else if activeTab === 'query'}
+				<input
+					bind:value={queryPath}
+					placeholder="JSONPath expression, e.g. $.users[?(@.age > 26)].name"
+					class="mb-2 w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-emerald-400"
+				/>
+				<MonacoField bind:value={queryInput} language="json" height="14rem" />
+{:else if activeTab === 'schema'}
+				<MonacoField bind:value={schemaInput} language="json" height="16rem" />
+{:else if activeTab === 'mock'}
+				<MonacoField bind:value={mockInput} language="json" height="16rem" />
+{:else if activeTab === 'paginate'}
+				<div class="mb-2 flex gap-3 text-sm text-gray-600">
+					<label class="flex items-center gap-1">
+						Page
+						<input type="number" bind:value={paginatePage} min="1" class="w-16 border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-emerald-400" />
+					</label>
+					<label class="flex items-center gap-1">
+						Page Size
+						<input type="number" bind:value={paginatePageSize} min="1" class="w-16 border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-emerald-400" />
+					</label>
+				</div>
+				<MonacoField bind:value={paginateInput} language="json" height="14rem" />
+{:else if activeTab === 'clean'}
+				<div class="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-gray-600">
+					<label><input type="checkbox" bind:checked={cleanOpts.removeNulls} /> Remove nulls</label>
+					<label><input type="checkbox" bind:checked={cleanOpts.removeEmptyObjects} /> Remove empty objects</label>
+					<label><input type="checkbox" bind:checked={cleanOpts.removeEmptyArrays} /> Remove empty arrays</label>
+					<label><input type="checkbox" bind:checked={cleanOpts.removeEmptyStrings} /> Remove empty strings</label>
+					<label><input type="checkbox" bind:checked={cleanOpts.sortKeys} /> Sort keys</label>
+					<label><input type="checkbox" bind:checked={cleanOpts.dedupeArrays} /> Dedupe arrays</label>
+					<label><input type="checkbox" bind:checked={cleanOpts.trimStrings} /> Trim strings</label>
+				</div>
+				<MonacoField bind:value={cleanInput} language="json" height="14rem" />
+			{:else if activeTab === 'compare'}
+				<div class="mb-2 flex gap-2">
+					<button
+						type="button"
+						onclick={runCompare}
+						class="flex items-center gap-1 px-3 py-1 text-sm rounded bg-emerald-500 text-white hover:bg-emerald-600"
+					>
+						<SafeIcon iconName="mdi:compare" customClass="h-4 w-4" />
+						Compare
+					</button>
+					<button
+						type="button"
+						onclick={swapCompare}
+						class="flex items-center gap-1 px-3 py-1 text-sm rounded border border-gray-300 text-gray-600 hover:bg-gray-50"
+					>
+						<SafeIcon iconName="mdi:swap-horizontal" customClass="h-4 w-4" />
+						Swap
+					</button>
+				</div>
+				<div class="mb-3">
+					<div class="mb-1 text-sm font-medium text-gray-600">Original JSON</div>
+					<MonacoField bind:value={compareOriginal} language="json" height="10rem" />
+				</div>
+				<div>
+					<div class="mb-1 text-sm font-medium text-gray-600">Modified JSON</div>
+					<MonacoField bind:value={compareModified} language="json" height="10rem" />
+				</div>
+{/if}
+		</div>
+
+		<div>
+			<div class="mb-2">
+				<span class="text-sm font-medium text-gray-600">Output</span>
+			</div>
+			{#if activeTab === 'compare'}
+				<GitHubDiff oldText={compareDiffOriginal} newText={compareDiffModified} />
+			{:else}
+				<MonacoField value={output} readonly language={outputLang} height="20rem" />
+			{/if}
+			{#if meta}
+				<div class="text-xs text-gray-500 mt-1">{meta}</div>
+			{/if}
+			{#if error}
+				<div class="text-xs text-red-600 mt-1">{error}</div>
+			{/if}
+		</div>
+	</div>
+	</div>
+</div>
